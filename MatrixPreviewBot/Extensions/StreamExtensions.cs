@@ -1,6 +1,6 @@
 namespace MatrixPreviewBot.Extensions;
 
-public static class SteamExtensions
+public static class StreamExtensions
 {
     public static async Task<MemoryStream> ToMemoryStreamAsync(this Stream stream)
     {

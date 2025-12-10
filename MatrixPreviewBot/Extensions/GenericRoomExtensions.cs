@@ -1,7 +1,7 @@
 using LibMatrix.EventTypes.Spec;
 using LibMatrix.RoomTypes;
 
-namespace MatrixPreviewBot;
+namespace MatrixPreviewBot.Extensions;
 
 public static class GenericRoomExtensions
 {
