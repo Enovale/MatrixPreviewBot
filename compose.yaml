@@ -1,0 +1,7 @@
+﻿services:
+  matrixpreviewbot:
+    image: matrixpreviewbot
+    build:
+      context: .
+      dockerfile: MatrixPreviewBot/Dockerfile
+
