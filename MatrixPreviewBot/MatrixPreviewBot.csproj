@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk.Worker">
 
     <PropertyGroup>
         <OutputType>Exe</OutputType>
@@ -24,8 +24,6 @@
           <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
         </PackageReference>
         <PackageReference Include="OpenGraph-Net" Version="4.0.1"/>
-        <PackageReference Include="RoryLibMatrix" Version="1.0.0-preview.20251210-173156" />
-        <PackageReference Include="RoryLibMatrix.Federation" Version="1.0.0-preview.20251210-173156" />
         <PackageReference Include="RoryLibMatrix.Utilities.Bot" Version="1.0.0-preview.20251210-173156" />
     </ItemGroup>
 
