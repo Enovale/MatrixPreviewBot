@@ -5,13 +5,19 @@ using LibMatrix.EventTypes.Spec;
 using LibMatrix.Homeservers;
 using LibMatrix.RoomTypes;
 using LibMatrix.Services;
+using LibMatrix.Utilities.Bot;
+using MatrixPreviewBot.Configuration;
 using MatrixPreviewBot.Extensions;
 using OpenGraphNet;
 using OpenGraphNet.Metadata;
 
 namespace MatrixPreviewBot;
 
-public class PreviewBot(AuthenticatedHomeserverGeneric hs, ILogger<PreviewBot> logger, HomeserverProviderService hsProviderService, BotConfiguration configuration)
+public class PreviewBot(
+    AuthenticatedHomeserverGeneric hs,
+    ILogger<PreviewBot> logger,
+    HomeserverProviderService hsProviderService,
+    BotConfiguration configuration)
     : IHostedService
 {
     private AuthenticatedHomeserverGeneric DecryptedHomeserver => _decryptedHs ?? hs;
@@ -37,6 +43,7 @@ public class PreviewBot(AuthenticatedHomeserverGeneric hs, ILogger<PreviewBot> l
 
     public async Task Run(CancellationToken cancellationToken)
     {
+#if DEBUG
         foreach (var room in await hs.GetJoinedRooms())
         {
             try
@@ -48,6 +55,7 @@ public class PreviewBot(AuthenticatedHomeserverGeneric hs, ILogger<PreviewBot> l
                 // Stub
             }
         }
+#endif
     }
 
     private async void UrisReceived(MatrixEventResponse @event, List<Uri> uris, bool containsOtherText)
@@ -75,7 +83,16 @@ public class PreviewBot(AuthenticatedHomeserverGeneric hs, ILogger<PreviewBot> l
 
     private async Task<bool> ProcessUri(GenericRoom room, Uri uri, string? prefix = null)
     {
-        var graph = await OpenGraph.ParseUrlAsync(uri, userAgent: UserAgent);
+        OpenGraph graph;
+        try
+        {
+            graph = await OpenGraph.ParseUrlAsync(uri, userAgent: UserAgent);
+        }
+        catch (Exception e)
+        {
+            logger.LogCritical("{Exception}", e);
+            return false;
+        }
 
         if (graph.Metadata.Count <= 0)
             return false;
@@ -89,7 +106,7 @@ public class PreviewBot(AuthenticatedHomeserverGeneric hs, ILogger<PreviewBot> l
             return false;
 
         var tcs = new TaskCompletionSource<bool>();
-        _ = ShowProcessingMessage(tcs, graph.Url, room);
+        _ = ShowProcessingMessage(tcs, graph.OriginalUrl, room);
 
         var videoIndex = 0;
         List<StructuredMetadata> toSkip = [];
@@ -191,7 +208,7 @@ public class PreviewBot(AuthenticatedHomeserverGeneric hs, ILogger<PreviewBot> l
                 content.Body = writer.ToString();
                 await using var html = new StringWriter();
                 await html.WriteAsync(
-                    $"<blockquote><div class=\"m13253-url-preview-headline\"><a class=\"m13253-url-preview-backref\" href=\"{graph.Url}\">{new Rune(0x1f517)}{new Rune(0xfe0f)}</a> <strong><a class=\"m13253-url-preview-title\" href=\"{graph.Url}\">{graph.Title}</a></strong>");
+                    $"<blockquote><div class=\"m13253-url-preview-headline\"><a class=\"m13253-url-preview-backref\" href=\"{graph.OriginalUrl}\">{new Rune(0x1f517)}{new Rune(0xfe0f)}</a> <strong><a class=\"m13253-url-preview-title\" href=\"{graph.OriginalUrl}\">{graph.Title}</a></strong>");
                 await html.WriteAsync($"<div class=\"m13253-url-preview-description\">{description}</div>");
                 content.FormattedBody = html.ToString();
                 content.Format = "org.matrix.custom.html";
@@ -208,13 +225,13 @@ public class PreviewBot(AuthenticatedHomeserverGeneric hs, ILogger<PreviewBot> l
     private async Task ShowProcessingMessage(TaskCompletionSource<bool> tcs, Uri? uri, GenericRoom room)
     {
         var decryptedRoom = DecryptedHomeserver.GetRoom(room.RoomId);
+        await decryptedRoom.SendTypingNotificationAsync(true, 10000);
         var @event = await room.SendMessageEventAsync(new RoomMessageEventContent
         {
             Format = "org.matrix.custom.html",
             FormattedBody =
                 $"<blockquote><div class=\"m13253-url-preview-headline\"><a class=\"m13253-url-preview-backref\" href=\"{uri}\">{new Rune(0x23f3)}{new Rune(0xfe0f)} <span class=\"m13253-url-preview-loading\"><em>Loading…</em></span></a></div></blockquote>"
         });
-        await decryptedRoom.SendTypingNotificationAsync(true, 10000);
         // Wait for previewing to complete
         await tcs.Task;
         await decryptedRoom.RedactEventAsync(@event.EventId, "Temporary, embed has been provided.");

@@ -4,6 +4,7 @@ using LibMatrix;
 using LibMatrix.EventTypes.Spec;
 using LibMatrix.Helpers;
 using LibMatrix.Homeservers;
+using MatrixPreviewBot.Configuration;
 
 namespace MatrixPreviewBot;
 
@@ -52,6 +53,7 @@ public partial class LinkListener(
                 {
                     @event.RoomId = roomResp.Key;
                     if (@event.OriginServerTs < _startupTime) continue; // ignore events older than startup time
+                    if (@event.Sender == hs.UserId) continue; // Ignore self sent events
 
                     try
                     {
@@ -67,7 +69,7 @@ public partial class LinkListener(
                                     logger.LogCritical(
                                         $"New URI in {@event.RoomId} from {@event.Sender}: {match.Value}");
                                     negativeBody = negativeBody.Remove(match.Index - (message.BodyWithoutReplyFallback.Length - negativeBody.Length), match.Length);
-                                    return Uri.TryCreate(match.Value, UriKind.Absolute, out var uri) ? uri : null;
+                                    return Uri.TryCreate(TransformUriByConfig(match.Value), UriKind.Absolute, out var uri) ? uri : null;
                                 }).Where(match => match != null).Cast<Uri>().ToList(), !negativeBody.IsWhiteSpace());
                             }
                         }
@@ -82,6 +84,18 @@ public partial class LinkListener(
         });
 
         await syncHelper.RunSyncLoopAsync(cancellationToken: _cts.Token);
+    }
+
+    private string TransformUriByConfig(string uri)
+    {
+        foreach (var entry in botConfig.SiteReplacements)
+        {
+            var newStr = entry.MatchRegex.Replace(uri, entry.Replace);
+            if (newStr != uri)
+                return newStr;
+        }
+
+        return uri;
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
