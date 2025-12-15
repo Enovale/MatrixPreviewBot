@@ -4,9 +4,6 @@ using LibMatrix;
 using LibMatrix.EventTypes.Spec;
 using LibMatrix.Helpers;
 using LibMatrix.Homeservers;
-using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
 
 namespace MatrixPreviewBot;
 
