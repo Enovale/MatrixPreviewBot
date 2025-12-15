@@ -101,7 +101,7 @@ public class PreviewBot(
 
         var previews = new List<ProcessedPreview>();
         var images = graph.Metadata.TryGetValue("og:image", out var value) ? value.ToList() : [];
-        var videos = graph.Metadata.TryGetValue("og:video", out var value2) ? value2 : [];
+        var videos = graph.Metadata.TryGetValue("og:video", out var value2) ? value2.ToList() : [];
         var audios = graph.Metadata.TryGetValue("og:audio", out var value3) ? value3 : [];
 
         if (images.Count + videos.Count + audios.Count <= 0)
@@ -111,15 +111,10 @@ public class PreviewBot(
         _ = ShowProcessingMessage(tcs, graph.OriginalUrl, room);
 
         var videoIndex = 0;
-        List<StructuredMetadata> toSkip = [];
         List<Task> tasks = [];
         // Preload all preview data and assemble the relevant info
-        foreach (var media in videos.Concat(images).Concat(audios))
+        foreach (var media in videos.Concat(images.Skip(videos.Count)).Concat(audios))
         {
-            if (toSkip.Contains(media))
-                continue;
-
-            // TODO: This DEFINITELY prevents the thumbnail skipping when cached but I CBA right now
             if (memCache.TryGetValue(media.Value, out var cachedPreview) && cachedPreview is ProcessedPreview cp)
             {
                 logger.LogInformation("{MediaValue}: Cache hit!", media.Value);
@@ -190,7 +185,6 @@ public class PreviewBot(
                         out var theight)
                         ? theight
                         : null;
-                    toSkip.Add(thumbnail);
                 }
             }
 
