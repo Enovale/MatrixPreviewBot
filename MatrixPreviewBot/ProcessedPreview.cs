@@ -1,6 +1,6 @@
 namespace MatrixPreviewBot;
 
-public struct ProcessedPreview
+public class ProcessedPreview
 {
     public string PreviewType;
     public string MediaFileName;

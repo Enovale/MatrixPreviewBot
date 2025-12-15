@@ -8,6 +8,7 @@ using LibMatrix.Services;
 using LibMatrix.Utilities.Bot;
 using MatrixPreviewBot.Configuration;
 using MatrixPreviewBot.Extensions;
+using Microsoft.Extensions.Caching.Memory;
 using OpenGraphNet;
 using OpenGraphNet.Metadata;
 
@@ -17,7 +18,8 @@ public class PreviewBot(
     AuthenticatedHomeserverGeneric hs,
     ILogger<PreviewBot> logger,
     HomeserverProviderService hsProviderService,
-    BotConfiguration configuration)
+    BotConfiguration configuration,
+    IMemoryCache memCache)
     : IHostedService
 {
     private AuthenticatedHomeserverGeneric DecryptedHomeserver => _decryptedHs ?? hs;
@@ -110,17 +112,29 @@ public class PreviewBot(
 
         var videoIndex = 0;
         List<StructuredMetadata> toSkip = [];
+        List<Task> tasks = [];
         // Preload all preview data and assemble the relevant info
         foreach (var media in videos.Concat(images).Concat(audios))
         {
             if (toSkip.Contains(media))
                 continue;
 
+            // TODO: This DEFINITELY prevents the thumbnail skipping when cached but I CBA right now
+            if (memCache.TryGetValue(media.Value, out var cachedPreview) && cachedPreview is ProcessedPreview cp)
+            {
+                logger.LogInformation("{MediaValue}: Cache hit!", media.Value);
+                previews.Add(cp);
+                continue;
+            }
+
+            logger.LogInformation("{MediaValue}: Cache miss!", media.Value);
+
             var preview = new ProcessedPreview
             {
                 PreviewType = media.Name,
                 MediaFileName = GetFileNameFromUrl(media.Value)
             };
+
             preview.MediaContentType = media.Properties.ValueOrNull("type")?.First() ??
                                        MimeTypes.GetMimeType(preview.MediaFileName);
             preview.MediaWidth = int.TryParse(media.Properties.ValueOrNull("width")?.First().Value, out var width)
@@ -129,10 +143,18 @@ public class PreviewBot(
             preview.MediaHeight = int.TryParse(media.Properties.ValueOrNull("height")?.First().Value, out var height)
                 ? height
                 : null;
-            var newStream = await (await HttpClient.GetStreamAsync(media.Value)).ToMemoryStreamAsync();
-            logger.LogInformation("Downloading {MediaType}: {MediaValue}", preview.MediaContentType, media.Value);
-            preview.MediaUrl = await hs.UploadFile(preview.MediaFileName, newStream, preview.MediaContentType);
-            preview.MediaSize = newStream.Length;
+
+            async Task DownloadMedia()
+            {
+                logger.LogInformation("Downloading {MediaType}: {MediaValue}", preview.MediaContentType,
+                    media.Value);
+                var newStream = await (await HttpClient.GetStreamAsync(media.Value)).ToMemoryStreamAsync();
+                preview.MediaUrl = await hs.UploadFile(preview.MediaFileName, newStream, preview.MediaContentType);
+                preview.MediaSize = newStream.Length;
+                memCache.Set(media.Value, preview);
+            }
+
+            tasks.Add(DownloadMedia());
             if (media.Name == "video")
             {
                 var thumbnail = images.Count >= videoIndex + 1 ? images[videoIndex] : null;
@@ -143,14 +165,23 @@ public class PreviewBot(
                     preview.ThumbnailFileName = GetFileNameFromUrl(thumbnail.Value);
                     preview.ThumbnailContentType = thumbnail.Properties.ValueOrNull("type")?.First() ??
                                                    MimeTypes.GetMimeType(preview.ThumbnailFileName);
-                    logger.LogInformation("Downloading {ThumbnailType} for video: {ThumbnailValue}",
-                        preview.ThumbnailContentType, thumbnail.Value);
-                    var thumbnailStream =
-                        await (await HttpClient.GetStreamAsync(thumbnail.Value)).ToMemoryStreamAsync();
-                    preview.ThumbnailUrl = await hs.UploadFile(
-                        preview.ThumbnailFileName,
-                        thumbnailStream,
-                        preview.ThumbnailContentType);
+
+                    async Task DownloadThumbnail()
+                    {
+                        logger.LogInformation("Downloading {ThumbnailType} for video: {ThumbnailValue}",
+                            preview.ThumbnailContentType, thumbnail.Value);
+                        var thumbnailStream =
+                            await (await HttpClient.GetStreamAsync(thumbnail.Value)).ToMemoryStreamAsync();
+                        preview.ThumbnailUrl = await hs.UploadFile(
+                            preview.ThumbnailFileName,
+                            thumbnailStream,
+                            preview.ThumbnailContentType);
+                        preview.ThumbnailSize = thumbnailStream.Length;
+                        memCache.Set(media.Value, preview);
+                    }
+
+                    tasks.Add(DownloadThumbnail());
+
                     preview.ThumbnailWidth = int.TryParse(thumbnail.Properties.ValueOrNull("width")?.First().Value,
                         out var twidth)
                         ? twidth
@@ -159,13 +190,14 @@ public class PreviewBot(
                         out var theight)
                         ? theight
                         : null;
-                    preview.ThumbnailSize = thumbnailStream.Length;
                     toSkip.Add(thumbnail);
                 }
             }
 
             previews.Add(preview);
         }
+
+        Task.WaitAll(tasks.ToArray());
 
         // Send the loaded previews
         for (var i = 0; i < previews.Count; i++)
@@ -225,13 +257,14 @@ public class PreviewBot(
     private async Task ShowProcessingMessage(TaskCompletionSource<bool> tcs, Uri? uri, GenericRoom room)
     {
         var decryptedRoom = DecryptedHomeserver.GetRoom(room.RoomId);
-        await decryptedRoom.SendTypingNotificationAsync(true, 10000);
+        await decryptedRoom.SendTypingNotificationAsync(true);
         var @event = await room.SendMessageEventAsync(new RoomMessageEventContent
         {
             Format = "org.matrix.custom.html",
             FormattedBody =
                 $"<blockquote><div class=\"m13253-url-preview-headline\"><a class=\"m13253-url-preview-backref\" href=\"{uri}\">{new Rune(0x23f3)}{new Rune(0xfe0f)} <span class=\"m13253-url-preview-loading\"><em>Loading…</em></span></a></div></blockquote>"
         });
+
         // Wait for previewing to complete
         await tcs.Task;
         await decryptedRoom.RedactEventAsync(@event.EventId, "Temporary, embed has been provided.");
