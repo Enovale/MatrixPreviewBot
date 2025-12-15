@@ -18,6 +18,7 @@ if (Environment.GetEnvironmentVariable("URL_PREVIEW_BOT_APPSETTINGS_PATH") is { 
 var host = builder.ConfigureServices((_, services) => {
     services.AddSingleton<BotConfiguration>();
     services.AddSingleton<LinkListenerConfiguration>();
+    services.AddMemoryCache();
 
     services.AddRoryLibMatrixServices(new() {
         AppName = "UrlPreviewBot"
