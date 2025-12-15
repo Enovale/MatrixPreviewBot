@@ -2,9 +2,6 @@
 using LibMatrix.Utilities.Bot;
 using MatrixPreviewBot;
 using MatrixPreviewBot.Handlers;
-using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
 
 var builder = Host.CreateDefaultBuilder(args);
 
