@@ -7,6 +7,7 @@ public static class StreamExtensions
         var ms = new MemoryStream();
         await stream.CopyToAsync(ms);
         ms.Position = 0;
+        await stream.DisposeAsync();
         return ms;
     }
 }

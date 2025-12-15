@@ -25,9 +25,6 @@ public class PreviewBot(
     private AuthenticatedHomeserverGeneric DecryptedHomeserver => _decryptedHs ?? hs;
     private AuthenticatedHomeserverGeneric? _decryptedHs;
 
-    private static readonly string UserAgent =
-        "Mozilla/5.0 (compatible; MatrixPreviewBot; +https://github.com/Enovale/MatrixPreviewBot; embed bot; like Discordbot)";
-
     private static readonly HttpClient HttpClient = new();
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -37,7 +34,7 @@ public class PreviewBot(
                 DecryptedHomeserver.AccessToken,
                 DecryptedHomeserver.Proxy);
 
-        HttpClient.DefaultRequestHeaders.Add("User-Agent", UserAgent);
+        HttpClient.DefaultRequestHeaders.Add("User-Agent", configuration.UserAgent);
         LinkListener.NewUriSent += UrisReceived;
         await Run(cancellationToken);
         logger.LogInformation("Bot started! " + hs.WhoAmI.UserId);
@@ -88,7 +85,7 @@ public class PreviewBot(
         OpenGraph graph;
         try
         {
-            graph = await OpenGraph.ParseUrlAsync(uri, userAgent: UserAgent);
+            graph = await OpenGraph.ParseUrlAsync(uri, userAgent: configuration.UserAgent);
         }
         catch (Exception e)
         {
@@ -139,16 +136,6 @@ public class PreviewBot(
                 ? height
                 : null;
 
-            async Task DownloadMedia()
-            {
-                logger.LogInformation("Downloading {MediaType}: {MediaValue}", preview.MediaContentType,
-                    media.Value);
-                var newStream = await (await HttpClient.GetStreamAsync(media.Value)).ToMemoryStreamAsync();
-                preview.MediaUrl = await hs.UploadFile(preview.MediaFileName, newStream, preview.MediaContentType);
-                preview.MediaSize = newStream.Length;
-                memCache.Set(media.Value, preview);
-            }
-
             tasks.Add(DownloadMedia());
             if (media.Name == "video")
             {
@@ -161,20 +148,6 @@ public class PreviewBot(
                     preview.ThumbnailContentType = thumbnail.Properties.ValueOrNull("type")?.First() ??
                                                    MimeTypes.GetMimeType(preview.ThumbnailFileName);
 
-                    async Task DownloadThumbnail()
-                    {
-                        logger.LogInformation("Downloading {ThumbnailType} for video: {ThumbnailValue}",
-                            preview.ThumbnailContentType, thumbnail.Value);
-                        var thumbnailStream =
-                            await (await HttpClient.GetStreamAsync(thumbnail.Value)).ToMemoryStreamAsync();
-                        preview.ThumbnailUrl = await hs.UploadFile(
-                            preview.ThumbnailFileName,
-                            thumbnailStream,
-                            preview.ThumbnailContentType);
-                        preview.ThumbnailSize = thumbnailStream.Length;
-                        memCache.Set(media.Value, preview);
-                    }
-
                     tasks.Add(DownloadThumbnail());
 
                     preview.ThumbnailWidth = int.TryParse(thumbnail.Properties.ValueOrNull("width")?.First().Value,
@@ -185,10 +158,35 @@ public class PreviewBot(
                         out var theight)
                         ? theight
                         : null;
+
+                    async Task DownloadThumbnail()
+                    {
+                        logger.LogInformation("Downloading {ThumbnailType} for video: {ThumbnailValue}",
+                            preview.ThumbnailContentType, thumbnail.Value);
+                        using var thumbnailStream =
+                            await (await HttpClient.GetStreamAsync(thumbnail.Value)).ToMemoryStreamAsync();
+                        preview.ThumbnailUrl = await hs.UploadFile(
+                            preview.ThumbnailFileName,
+                            thumbnailStream,
+                            preview.ThumbnailContentType);
+                        preview.ThumbnailSize = thumbnailStream.Length;
+                        memCache.Set(media.Value, preview);
+                    }
                 }
             }
 
             previews.Add(preview);
+            continue;
+
+            async Task DownloadMedia()
+            {
+                logger.LogInformation("Downloading {MediaType}: {MediaValue}", preview.MediaContentType,
+                    media.Value);
+                using var newStream = await (await HttpClient.GetStreamAsync(media.Value)).ToMemoryStreamAsync();
+                preview.MediaUrl = await hs.UploadFile(preview.MediaFileName, newStream, preview.MediaContentType);
+                preview.MediaSize = newStream.Length;
+                memCache.Set(media.Value, preview);
+            }
         }
 
         Task.WaitAll(tasks.ToArray());
