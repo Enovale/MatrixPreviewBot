@@ -1,6 +1,7 @@
 ﻿using LibMatrix.Services;
 using LibMatrix.Utilities.Bot;
 using MatrixPreviewBot;
+using MatrixPreviewBot.Configuration;
 using MatrixPreviewBot.Handlers;
 
 var builder = Host.CreateDefaultBuilder(args);
