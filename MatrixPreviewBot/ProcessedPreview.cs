@@ -1,5 +1,6 @@
 namespace MatrixPreviewBot;
 
+[Serializable]
 public class ProcessedPreview
 {
     public string PreviewType;

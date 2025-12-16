@@ -5,12 +5,10 @@ using LibMatrix.EventTypes.Spec;
 using LibMatrix.Homeservers;
 using LibMatrix.RoomTypes;
 using LibMatrix.Services;
-using LibMatrix.Utilities.Bot;
 using MatrixPreviewBot.Configuration;
 using MatrixPreviewBot.Extensions;
 using Microsoft.Extensions.Caching.Memory;
 using OpenGraphNet;
-using OpenGraphNet.Metadata;
 
 namespace MatrixPreviewBot;
 
@@ -96,149 +94,180 @@ public class PreviewBot(
         if (graph.Metadata.Count <= 0)
             return false;
 
+        await using var writer = new StringWriter();
+        await writer.WriteLineAsync($"> {graph.Title}");
+        var description = graph.Metadata.GetOrNull("og:description")?.FirstOrDefault()?.Value;
+        await writer.WriteLineAsync($"> {description}");
+        // This could be changed to a MessageBuilder, but it supports none of these tags out of the box,
+        // so I think it's just easier to not use it at all.
+        await using var html = new StringWriter();
+        await html.WriteAsync(
+            $"<blockquote><div class=\"m13253-url-preview-headline\"><a class=\"m13253-url-preview-backref\" href=\"{graph.OriginalUrl}\">{new Rune(0x1f517)}{new Rune(0xfe0f)}</a> <strong><a class=\"m13253-url-preview-title\" href=\"{graph.OriginalUrl}\">{graph.Title}</a></strong>");
+        await html.WriteAsync(
+            $"<div class=\"m13253-url-preview-description\">{description?.Replace("\n", "<br>")}</div>");
+
         var previews = new List<ProcessedPreview>();
+        var cardType = graph.Metadata.GetOrNull("twitter:card")?.FirstOrDefault()?.Value;
+        var cardNeedsImages = cardType != "summary" && cardType != "undefined";
         var images = graph.Metadata.TryGetValue("og:image", out var value) ? value.ToList() : [];
         var videos = graph.Metadata.TryGetValue("og:video", out var value2) ? value2.ToList() : [];
         var audios = graph.Metadata.TryGetValue("og:audio", out var value3) ? value3 : [];
 
-        if (images.Count + videos.Count + audios.Count <= 0)
-            return false;
-
         var tcs = new TaskCompletionSource<bool>();
-        _ = ShowProcessingMessage(tcs, graph.OriginalUrl, room);
-
-        var videoIndex = 0;
-        List<Task> tasks = [];
-        // Preload all preview data and assemble the relevant info
-        foreach (var media in videos.Concat(images.Skip(videos.Count)).Concat(audios))
+        if (cardNeedsImages && images.Count + videos.Count + audios.Count > 0)
         {
-            if (memCache.TryGetValue(media.Value, out var cachedPreview) && cachedPreview is ProcessedPreview cp)
+            _ = ShowProcessingMessage(tcs, graph.OriginalUrl, room);
+
+            var videoIndex = 0;
+            List<Task> tasks = [];
+            // Preload all preview data and assemble the relevant info
+            foreach (var media in videos.Concat(images.Skip(videos.Count)).Concat(audios))
             {
-                logger.LogInformation("{MediaValue}: Cache hit!", media.Value);
-                previews.Add(cp);
-                continue;
-            }
-
-            logger.LogInformation("{MediaValue}: Cache miss!", media.Value);
-
-            var preview = new ProcessedPreview
-            {
-                PreviewType = media.Name,
-                MediaFileName = GetFileNameFromUrl(media.Value)
-            };
-
-            preview.MediaContentType = media.Properties.ValueOrNull("type")?.First() ??
-                                       MimeTypes.GetMimeType(preview.MediaFileName);
-            preview.MediaWidth = int.TryParse(media.Properties.ValueOrNull("width")?.First().Value, out var width)
-                ? width
-                : null;
-            preview.MediaHeight = int.TryParse(media.Properties.ValueOrNull("height")?.First().Value, out var height)
-                ? height
-                : null;
-
-            tasks.Add(DownloadMedia());
-            if (media.Name == "video")
-            {
-                var thumbnail = images.Count >= videoIndex + 1 ? images[videoIndex] : null;
-                videoIndex++;
-
-                if (thumbnail != null)
+                if (memCache.TryGetValue(media.Value, out var cachedPreview) && cachedPreview is ProcessedPreview cp)
                 {
-                    preview.ThumbnailFileName = GetFileNameFromUrl(thumbnail.Value);
-                    preview.ThumbnailContentType = thumbnail.Properties.ValueOrNull("type")?.First() ??
-                                                   MimeTypes.GetMimeType(preview.ThumbnailFileName);
+                    logger.LogInformation("{MediaValue}: Cache hit!", media.Value);
+                    previews.Add(cp);
+                    continue;
+                }
 
-                    tasks.Add(DownloadThumbnail());
+                logger.LogInformation("{MediaValue}: Cache miss!", media.Value);
 
-                    preview.ThumbnailWidth = int.TryParse(thumbnail.Properties.ValueOrNull("width")?.First().Value,
-                        out var twidth)
-                        ? twidth
-                        : null;
-                    preview.ThumbnailHeight = int.TryParse(thumbnail.Properties.ValueOrNull("height")?.First().Value,
-                        out var theight)
-                        ? theight
-                        : null;
+                var preview = new ProcessedPreview
+                {
+                    PreviewType = media.Name,
+                    MediaFileName = GetFileNameFromUrl(media.Value),
+                    MediaWidth = int.TryParse(media.Properties.ValueOrNull("width")?.First().Value, out var width)
+                        ? width
+                        : null,
+                    MediaHeight = int.TryParse(media.Properties.ValueOrNull("height")?.First().Value, out var height)
+                        ? height
+                        : null
+                };
 
-                    async Task DownloadThumbnail()
+                if (preview.MediaWidth + preview.MediaHeight <= 0)
+                    continue;
+
+                preview.MediaContentType = media.Properties.ValueOrNull("type")?.First() ??
+                                           MimeTypes.GetMimeType(preview.MediaFileName);
+
+                var mimeCategory = preview.MediaContentType.Split("/").First();
+                if (mimeCategory != media.Name)
+                {
+                    logger.LogWarning(
+                        "MimeType discrepancy! Set: {PreviewMediaContentType}, Mime: {MimeCategory}, Media.Name: {MediaName}",
+                        preview.MediaContentType, mimeCategory, media.Name);
+                    preview.PreviewType = mimeCategory;
+                }
+
+                tasks.Add(DownloadMedia());
+                if (media.Name == "video")
+                {
+                    var thumbnail = images.Count >= videoIndex + 1 ? images[videoIndex] : null;
+                    videoIndex++;
+
+                    if (thumbnail != null)
                     {
-                        logger.LogInformation("Downloading {ThumbnailType} for video: {ThumbnailValue}",
-                            preview.ThumbnailContentType, thumbnail.Value);
-                        using var thumbnailStream =
-                            await (await HttpClient.GetStreamAsync(thumbnail.Value)).ToMemoryStreamAsync();
-                        preview.ThumbnailUrl = await hs.UploadFile(
-                            preview.ThumbnailFileName,
-                            thumbnailStream,
-                            preview.ThumbnailContentType);
-                        preview.ThumbnailSize = thumbnailStream.Length;
-                        memCache.Set(media.Value, preview);
+                        preview.ThumbnailWidth = int.TryParse(thumbnail.Properties.ValueOrNull("width")?.First().Value,
+                            out var twidth)
+                            ? twidth
+                            : null;
+                        preview.ThumbnailHeight = int.TryParse(
+                            thumbnail.Properties.ValueOrNull("height")?.First().Value,
+                            out var theight)
+                            ? theight
+                            : null;
+
+                        if (preview.ThumbnailWidth + preview.ThumbnailHeight > 0)
+                        {
+                            preview.ThumbnailFileName = GetFileNameFromUrl(thumbnail.Value);
+                            preview.ThumbnailContentType = thumbnail.Properties.ValueOrNull("type")?.First() ??
+                                                           MimeTypes.GetMimeType(preview.ThumbnailFileName);
+                            tasks.Add(DownloadThumbnail());
+                        }
+
+                        async Task DownloadThumbnail()
+                        {
+                            logger.LogInformation("Downloading {ThumbnailType} for video: {ThumbnailValue}",
+                                preview.ThumbnailContentType, thumbnail.Value);
+                            using var thumbnailStream =
+                                await (await HttpClient.GetStreamAsync(thumbnail.Value)).ToMemoryStreamAsync();
+                            preview.ThumbnailUrl = await hs.UploadFile(
+                                preview.ThumbnailFileName,
+                                thumbnailStream,
+                                preview.ThumbnailContentType);
+                            preview.ThumbnailSize = thumbnailStream.Length;
+                            memCache.Set(media.Value, preview);
+                        }
                     }
                 }
+
+                previews.Add(preview);
+                continue;
+
+                async Task DownloadMedia()
+                {
+                    logger.LogInformation("Downloading {MediaType}: {MediaValue}", preview.MediaContentType,
+                        media.Value);
+                    using var newStream = await (await HttpClient.GetStreamAsync(media.Value)).ToMemoryStreamAsync();
+                    preview.MediaUrl = await hs.UploadFile(preview.MediaFileName, newStream, preview.MediaContentType);
+                    preview.MediaSize = newStream.Length;
+                    memCache.Set(media.Value, preview);
+                }
             }
 
-            previews.Add(preview);
-            continue;
+            Task.WaitAll(tasks.ToArray());
 
-            async Task DownloadMedia()
+            // Send the loaded previews
+            for (var i = 0; i < previews.Count; i++)
             {
-                logger.LogInformation("Downloading {MediaType}: {MediaValue}", preview.MediaContentType,
-                    media.Value);
-                using var newStream = await (await HttpClient.GetStreamAsync(media.Value)).ToMemoryStreamAsync();
-                preview.MediaUrl = await hs.UploadFile(preview.MediaFileName, newStream, preview.MediaContentType);
-                preview.MediaSize = newStream.Length;
-                memCache.Set(media.Value, preview);
+                var preview = previews[i];
+                var content = new RoomMessageEventContent
+                {
+                    MessageType = "m." + preview.PreviewType,
+                    Url = preview.MediaUrl,
+                    FileName = preview.MediaFileName,
+                    FileInfo = new RoomMessageEventContent.FileInfoStruct
+                    {
+                        MimeType = preview.MediaContentType,
+                        Width = preview.MediaWidth,
+                        Height = preview.MediaHeight,
+                        Size = preview.MediaSize,
+                        ThumbnailUrl = preview.ThumbnailUrl,
+                        ThumbnailInfo = new RoomMessageEventContent.FileInfoStruct.ThumbnailInfoStruct
+                        {
+                            MimeType = preview.ThumbnailContentType,
+                            Width = preview.ThumbnailWidth,
+                            Height = preview.ThumbnailHeight,
+                            Size = preview.ThumbnailSize
+                        },
+                    }
+                };
+
+                if (prefix != null && i == 0)
+                {
+                    _ = room.SendMessageEventAsync(new RoomMessageEventContent(body: prefix));
+                }
+
+                // Create the body if it's the last preview
+                if (i == previews.Count - 1)
+                {
+                    content.Body = writer.ToString();
+                    content.FormattedBody = html.ToString();
+                    content.Format = "org.matrix.custom.html";
+                }
+
+                _ = room.SendMessageEventAsync(content);
             }
         }
-
-        Task.WaitAll(tasks.ToArray());
-
-        // Send the loaded previews
-        for (var i = 0; i < previews.Count; i++)
+        
+        if (previews.Count <= 0)
         {
-            var preview = previews[i];
-            var content = new RoomMessageEventContent
+            _ = room.SendMessageEventAsync(new RoomMessageEventContent
             {
-                MessageType = "m." + preview.PreviewType,
-                Url = preview.MediaUrl,
-                FileName = preview.MediaFileName,
-                FileInfo = new RoomMessageEventContent.FileInfoStruct
-                {
-                    MimeType = preview.MediaContentType,
-                    Width = preview.MediaWidth,
-                    Height = preview.MediaHeight,
-                    Size = preview.MediaSize,
-                    ThumbnailUrl = preview.ThumbnailUrl,
-                    ThumbnailInfo = new RoomMessageEventContent.FileInfoStruct.ThumbnailInfoStruct
-                    {
-                        MimeType = preview.ThumbnailContentType,
-                        Width = preview.ThumbnailWidth,
-                        Height = preview.ThumbnailHeight,
-                        Size = preview.ThumbnailSize
-                    },
-                }
-            };
-
-            if (prefix != null && i == 0)
-            {
-                _ = room.SendMessageEventAsync(new RoomMessageEventContent(body: prefix));
-            }
-
-            // Create the body if it's the last preview
-            if (i == previews.Count - 1)
-            {
-                await using var writer = new StringWriter();
-                await writer.WriteLineAsync($"> {graph.Title}");
-                var description = graph.Metadata.GetOrNull("og:description")?.FirstOrDefault()?.Value;
-                await writer.WriteLineAsync($"> {description}");
-                content.Body = writer.ToString();
-                await using var html = new StringWriter();
-                await html.WriteAsync(
-                    $"<blockquote><div class=\"m13253-url-preview-headline\"><a class=\"m13253-url-preview-backref\" href=\"{graph.OriginalUrl}\">{new Rune(0x1f517)}{new Rune(0xfe0f)}</a> <strong><a class=\"m13253-url-preview-title\" href=\"{graph.OriginalUrl}\">{graph.Title}</a></strong>");
-                await html.WriteAsync($"<div class=\"m13253-url-preview-description\">{description}</div>");
-                content.FormattedBody = html.ToString();
-                content.Format = "org.matrix.custom.html";
-            }
-
-            _ = room.SendMessageEventAsync(content);
+                Format = "org.matrix.custom.html",
+                Body = writer.ToString(),
+                FormattedBody = html.ToString()
+            });
         }
 
         // Tell processing routine that we're done
