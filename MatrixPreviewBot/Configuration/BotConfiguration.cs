@@ -1,5 +1,3 @@
-using System.Text.RegularExpressions;
-
 namespace MatrixPreviewBot.Configuration;
 
 public class BotConfiguration
