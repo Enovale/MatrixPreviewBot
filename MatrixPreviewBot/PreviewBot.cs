@@ -80,6 +80,10 @@ public class PreviewBot(
 
     private async Task<bool> ProcessUri(GenericRoom room, Uri uri, string? prefix = null)
     {
+        var tcs = new TaskCompletionSource<bool>();
+        if (await ProcessDirectMedia(tcs, room, uri, prefix))
+            return true;
+
         OpenGraph graph;
         try
         {
@@ -113,7 +117,6 @@ public class PreviewBot(
         var videos = graph.Metadata.TryGetValue("og:video", out var value2) ? value2.ToList() : [];
         var audios = graph.Metadata.TryGetValue("og:audio", out var value3) ? value3 : [];
 
-        var tcs = new TaskCompletionSource<bool>();
         if (cardNeedsImages && images.Count + videos.Count + audios.Count > 0)
         {
             _ = ShowProcessingMessage(tcs, graph.OriginalUrl, room);
@@ -135,7 +138,7 @@ public class PreviewBot(
                 var preview = new ProcessedPreview
                 {
                     PreviewType = media.Name,
-                    MediaFileName = GetFileNameFromUrl(media.Value),
+                    MediaFileName = GetFileNameFromUrl(media.Value)!,
                     MediaWidth = int.TryParse(media.Properties.ValueOrNull("width")?.First().Value, out var width)
                         ? width
                         : null,
@@ -156,7 +159,7 @@ public class PreviewBot(
                     logger.LogWarning(
                         "MimeType discrepancy! Set: {PreviewMediaContentType}, Mime: {MimeCategory}, Media.Name: {MediaName}",
                         preview.MediaContentType, mimeCategory, media.Name);
-                    
+
                     if (mimeCategory is "image" or "video" or "audio")
                         preview.PreviewType = mimeCategory;
                 }
@@ -261,7 +264,7 @@ public class PreviewBot(
                 _ = room.SendMessageEventAsync(content);
             }
         }
-        
+
         if (previews.Count <= 0)
         {
             _ = room.SendMessageEventAsync(new RoomMessageEventContent
@@ -273,6 +276,56 @@ public class PreviewBot(
         }
 
         // Tell processing routine that we're done
+        tcs.SetResult(true);
+        return true;
+    }
+
+    private async Task<bool> ProcessDirectMedia(TaskCompletionSource<bool> tcs, GenericRoom room, Uri uri, string? prefix = null)
+    {
+        var head = await HttpClient.SendAsync(new HttpRequestMessage(HttpMethod.Head, uri));
+
+        var mimeType = head.Content.Headers.ContentType?.MediaType;
+        var mimeCategory = mimeType?.Split("/").First();
+
+        if (mimeCategory is not ("image" or "video" or "audio"))
+            return false;
+
+        _ = ShowProcessingMessage(tcs, uri, room);
+
+        var realUrl = head.RequestMessage?.RequestUri?.ToString();
+
+        if (realUrl is null)
+            return false;
+
+        if (!memCache.TryGetValue(realUrl, out var preview) || preview is not ProcessedPreview cp)
+        {
+            using var stream = await (await HttpClient.GetStreamAsync(uri)).ToMemoryStreamAsync();
+            var fileName = GetFileNameFromUrl(realUrl);
+            var mediaUrl = await hs.UploadFile(fileName!, stream, mimeType!);
+            cp = new ProcessedPreview
+            {
+                MediaFileName = fileName!,
+                MediaSize = stream.Length,
+                MediaUrl = mediaUrl
+            };
+            memCache.Set(realUrl, cp);
+        }
+
+        if (prefix != null)
+            _ = room.SendMessageEventAsync(new RoomMessageEventContent(body: prefix));
+
+        _ = room.SendMessageEventAsync(new RoomMessageEventContent
+        {
+            FileName = cp.MediaFileName,
+            Url = cp.MediaUrl,
+            MessageType = "m." + mimeCategory,
+            FileInfo = new RoomMessageEventContent.FileInfoStruct
+            {
+                Size = cp.MediaSize,
+                MimeType = mimeType,
+            }
+        });
+
         tcs.SetResult(true);
         return true;
     }
@@ -294,8 +347,11 @@ public class PreviewBot(
         await decryptedRoom.SendTypingNotificationAsync(false);
     }
 
-    private static string GetFileNameFromUrl(string url)
+    private static string? GetFileNameFromUrl(string? url)
     {
+        if (url is null)
+            return null;
+
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
             uri = new Uri(url);
 
