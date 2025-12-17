@@ -144,7 +144,7 @@ public class PreviewBot(
                         : null
                 };
 
-                if (preview.MediaWidth + preview.MediaHeight <= 0)
+                if (preview.MediaWidth <= 0 || preview.MediaHeight <= 0)
                     continue;
 
                 preview.MediaContentType = media.Properties.ValueOrNull("type")?.First() ??
@@ -156,7 +156,9 @@ public class PreviewBot(
                     logger.LogWarning(
                         "MimeType discrepancy! Set: {PreviewMediaContentType}, Mime: {MimeCategory}, Media.Name: {MediaName}",
                         preview.MediaContentType, mimeCategory, media.Name);
-                    preview.PreviewType = mimeCategory;
+                    
+                    if (mimeCategory is "image" or "video" or "audio")
+                        preview.PreviewType = mimeCategory;
                 }
 
                 tasks.Add(DownloadMedia());
@@ -177,7 +179,7 @@ public class PreviewBot(
                             ? theight
                             : null;
 
-                        if (preview.ThumbnailWidth + preview.ThumbnailHeight > 0)
+                        if (preview is { ThumbnailWidth: > 0, ThumbnailHeight: > 0 })
                         {
                             preview.ThumbnailFileName = GetFileNameFromUrl(thumbnail.Value);
                             preview.ThumbnailContentType = thumbnail.Properties.ValueOrNull("type")?.First() ??
