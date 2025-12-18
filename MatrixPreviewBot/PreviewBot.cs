@@ -37,7 +37,7 @@ public class PreviewBot(
                 DecryptedHomeserver.AccessToken,
                 DecryptedHomeserver.Proxy);
 
-        httpClient.DefaultRequestHeaders.Add("User-Agent", configuration.UserAgent);
+        httpClient.DefaultRequestHeaders.UserAgent.ParseAdd(configuration.UserAgent);
         LinkListener.NewUriSent += UrisReceived;
         await Run(cancellationToken);
         logger.LogInformation("Bot started! " + hs.WhoAmI.UserId);
@@ -77,7 +77,7 @@ public class PreviewBot(
 
                 foreach (var processor in Processors)
                 {
-                    var result = await processor.ProcessUriAsync(room, uri);
+                    var result = await processor.ProcessUriAsync(room, uri).ConfigureAwait(false);
                     if (result != null)
                         results.Add(result);
                 }
@@ -116,17 +116,17 @@ public class PreviewBot(
             Format = "org.matrix.custom.html",
             FormattedBody =
                 $"<blockquote><div class=\"m13253-url-preview-headline\"><a class=\"m13253-url-preview-backref\" href=\"{uri}\">{new Rune(0x23f3)}{new Rune(0xfe0f)} <span class=\"m13253-url-preview-loading\"><em>Loading…</em></span></a></div></blockquote>"
-        });
+        }).ConfigureAwait(false);
 
         // Wait for previewing to complete
         while (!tcs.Task.IsCompleted)
         {
             await Task.Delay(1000);
-            await decryptedRoom.SendTypingNotificationAsync(true);
+            await decryptedRoom.SendTypingNotificationAsync(true).ConfigureAwait(false);
         }
 
-        await decryptedRoom.RedactEventAsync(@event.EventId, "Temporary, embed has been provided.");
-        await decryptedRoom.SendTypingNotificationAsync(false);
+        await decryptedRoom.RedactEventAsync(@event.EventId, "Temporary, embed has been provided.").ConfigureAwait(false);
+        await decryptedRoom.SendTypingNotificationAsync(false).ConfigureAwait(false);
     }
 
     internal static string? GetFileNameFromUrl(string? url)

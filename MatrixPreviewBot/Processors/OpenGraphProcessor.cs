@@ -3,22 +3,26 @@ using ArcaneLibs.Extensions;
 using LibMatrix.EventTypes.Spec;
 using LibMatrix.Homeservers;
 using LibMatrix.RoomTypes;
-using MatrixPreviewBot.Configuration;
 using MatrixPreviewBot.Extensions;
 using Microsoft.Extensions.Caching.Memory;
 using OpenGraphNet;
 
 namespace MatrixPreviewBot.Processors;
 
-public class OpenGraphProcessor(ILogger<OpenGraphProcessor> logger, AuthenticatedHomeserverGeneric hs, BotConfiguration configuration, IMemoryCache memCache, HttpClient httpClient) : ProcessorBase
+public class OpenGraphProcessor(
+    ILogger<OpenGraphProcessor> logger,
+    AuthenticatedHomeserverGeneric hs,
+    IMemoryCache memCache,
+    HttpClient httpClient) : ProcessorBase
 {
     public override async Task<IEnumerable<RoomMessageEventContent>?> ProcessUriAsync(GenericRoom room, Uri uri)
     {
         OpenGraph graph;
         try
         {
-            // TODO Download html ourselves to reuse HttpClient
-            graph = await OpenGraph.ParseUrlAsync(uri, userAgent: configuration.UserAgent);
+            var response = await httpClient.GetAsync(uri).ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
+            graph = OpenGraph.ParseHtml(await response.Content.ReadAsStringAsync().ConfigureAwait(false));
         }
         catch (Exception e)
         {
@@ -124,12 +128,11 @@ public class OpenGraphProcessor(ILogger<OpenGraphProcessor> logger, Authenticate
                         {
                             logger.LogInformation("Downloading {ThumbnailType} for video: {ThumbnailValue}",
                                 preview.ThumbnailContentType, thumbnail.Value);
-                            using var thumbnailStream =
-                                await (await httpClient.GetStreamAsync(thumbnail.Value)).ToMemoryStreamAsync();
+                            using var thumbnailStream = await httpClient.GetPageInMemoryAsync(thumbnail.Value).ConfigureAwait(false);
                             preview.ThumbnailUrl = await hs.UploadFile(
                                 preview.ThumbnailFileName,
                                 thumbnailStream,
-                                preview.ThumbnailContentType);
+                                preview.ThumbnailContentType).ConfigureAwait(false);
                             preview.ThumbnailSize = thumbnailStream.Length;
                             memCache.Set(media.Value, preview);
                         }
@@ -143,8 +146,9 @@ public class OpenGraphProcessor(ILogger<OpenGraphProcessor> logger, Authenticate
                 {
                     logger.LogInformation("Downloading {MediaType}: {MediaValue}", preview.MediaContentType,
                         media.Value);
-                    using var newStream = await (await httpClient.GetStreamAsync(media.Value)).ToMemoryStreamAsync();
-                    preview.MediaUrl = await hs.UploadFile(preview.MediaFileName, newStream, preview.MediaContentType);
+                    using var newStream = await httpClient.GetPageInMemoryAsync(media.Value).ConfigureAwait(false);
+                    preview.MediaUrl = await hs.UploadFile(preview.MediaFileName, newStream, preview.MediaContentType)
+                        .ConfigureAwait(false);
                     preview.MediaSize = newStream.Length;
                     memCache.Set(media.Value, preview);
                 }
