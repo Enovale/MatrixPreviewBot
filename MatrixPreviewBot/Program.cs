@@ -3,6 +3,7 @@ using LibMatrix.Utilities.Bot;
 using MatrixPreviewBot;
 using MatrixPreviewBot.Configuration;
 using MatrixPreviewBot.Handlers;
+using MatrixPreviewBot.Processors;
 
 var builder = Host.CreateDefaultBuilder(args);
 
@@ -18,6 +19,8 @@ if (Environment.GetEnvironmentVariable("URL_PREVIEW_BOT_APPSETTINGS_PATH") is { 
 var host = builder.ConfigureServices((_, services) => {
     services.AddSingleton<BotConfiguration>();
     services.AddSingleton<LinkListenerConfiguration>();
+    
+    services.AddSingleton<HttpClient>();
     services.AddMemoryCache();
 
     services.AddRoryLibMatrixServices(new() {
@@ -26,6 +29,11 @@ var host = builder.ConfigureServices((_, services) => {
     services.AddMatrixBot()
         .WithInviteHandler(InviteHandler.HandleAsync)
         ;
+    
+    // Add processors
+    services.AddSingleton<TumblrProcessor>();
+    services.AddSingleton<DirectMediaProcessor>();
+    services.AddSingleton<OpenGraphProcessor>();
 
     services.AddHostedService<LinkListener>();
     services.AddHostedService<PreviewBot>();
