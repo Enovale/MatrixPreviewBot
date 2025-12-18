@@ -7,6 +7,7 @@ using LibMatrix.RoomTypes;
 using LibMatrix.Services;
 using MatrixPreviewBot.Configuration;
 using MatrixPreviewBot.Extensions;
+using MatrixPreviewBot.Processors;
 using Microsoft.Extensions.Caching.Memory;
 using OpenGraphNet;
 
@@ -17,13 +18,17 @@ public class PreviewBot(
     ILogger<PreviewBot> logger,
     HomeserverProviderService hsProviderService,
     BotConfiguration configuration,
-    IMemoryCache memCache)
+    IMemoryCache memCache,
+    HttpClient httpClient,
+    TumblrProcessor tumblrProcessor,
+    DirectMediaProcessor directMediaProcessor,
+    OpenGraphProcessor openGraphProcessor)
     : IHostedService
 {
     private AuthenticatedHomeserverGeneric DecryptedHomeserver => _decryptedHs ?? hs;
     private AuthenticatedHomeserverGeneric? _decryptedHs;
 
-    private static readonly HttpClient HttpClient = new();
+    private List<ProcessorBase> Processors = [tumblrProcessor, directMediaProcessor, openGraphProcessor];
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
@@ -32,7 +37,7 @@ public class PreviewBot(
                 DecryptedHomeserver.AccessToken,
                 DecryptedHomeserver.Proxy);
 
-        HttpClient.DefaultRequestHeaders.Add("User-Agent", configuration.UserAgent);
+        httpClient.DefaultRequestHeaders.Add("User-Agent", configuration.UserAgent);
         LinkListener.NewUriSent += UrisReceived;
         await Run(cancellationToken);
         logger.LogInformation("Bot started! " + hs.WhoAmI.UserId);
@@ -61,12 +66,36 @@ public class PreviewBot(
         {
             var room = hs.GetRoom(@event.RoomId!);
             var shouldDelete = configuration.DeleteOriginalIfEmpty && !containsOtherText;
+            var prefix = shouldDelete ? $"{@event.Sender} sent:" : null;
             var anythingReturned = false;
+            List<IEnumerable<RoomMessageEventContent>> results = [];
 
             foreach (var uri in uris)
             {
-                if (await ProcessUri(room, uri, shouldDelete ? $"{@event.Sender} sent:" : null))
+                var tcs = new TaskCompletionSource<bool>();
+                _ = ShowProcessingMessage(tcs, uri, room);
+
+                foreach (var processor in Processors)
+                {
+                    var result = await processor.ProcessUriAsync(room, uri);
+                    if (result != null)
+                        results.Add(result);
+                }
+
+                tcs.SetResult(true);
+            }
+
+            foreach (var resultSet in results)
+            {
+                foreach (var message in resultSet)
+                {
+                    if (!anythingReturned)
+                        _ = room.SendMessageEventAsync(new RoomMessageEventContent(body: prefix));
+
                     anythingReturned = true;
+
+                    _ = room.SendMessageEventAsync(message);
+                }
             }
 
             if (anythingReturned && shouldDelete)
@@ -74,266 +103,14 @@ public class PreviewBot(
         }
         catch (Exception e)
         {
-            throw; // TODO handle exception
-        }
-    }
-
-    private async Task<bool> ProcessUri(GenericRoom room, Uri uri, string? prefix = null)
-    {
-        var tcs = new TaskCompletionSource<bool>();
-        if (await ProcessDirectMedia(tcs, room, uri, prefix))
-            return true;
-
-        OpenGraph graph;
-        try
-        {
-            graph = await OpenGraph.ParseUrlAsync(uri, userAgent: configuration.UserAgent);
-        }
-        catch (Exception e)
-        {
             logger.LogCritical("{Exception}", e);
-            return false;
         }
-
-        if (graph.Metadata.Count <= 0)
-            return false;
-
-        await using var writer = new StringWriter();
-        await writer.WriteLineAsync($"> {graph.Title}");
-        var description = graph.Metadata.GetOrNull("og:description")?.FirstOrDefault()?.Value;
-        await writer.WriteLineAsync($"> {description}");
-        // This could be changed to a MessageBuilder, but it supports none of these tags out of the box,
-        // so I think it's just easier to not use it at all.
-        await using var html = new StringWriter();
-        await html.WriteAsync(
-            $"<blockquote><div class=\"m13253-url-preview-headline\"><a class=\"m13253-url-preview-backref\" href=\"{graph.OriginalUrl}\">{new Rune(0x1f517)}{new Rune(0xfe0f)}</a> <strong><a class=\"m13253-url-preview-title\" href=\"{graph.OriginalUrl}\">{graph.Title}</a></strong>");
-        await html.WriteAsync(
-            $"<div class=\"m13253-url-preview-description\">{description?.Replace("\n", "<br>")}</div>");
-
-        var previews = new List<ProcessedPreview>();
-        var cardType = graph.Metadata.GetOrNull("twitter:card")?.FirstOrDefault()?.Value;
-        var cardNeedsImages = cardType != "summary" && cardType != "undefined";
-        var images = graph.Metadata.TryGetValue("og:image", out var value) ? value.ToList() : [];
-        var videos = graph.Metadata.TryGetValue("og:video", out var value2) ? value2.ToList() : [];
-        var audios = graph.Metadata.TryGetValue("og:audio", out var value3) ? value3 : [];
-
-        if (cardNeedsImages && images.Count + videos.Count + audios.Count > 0)
-        {
-            _ = ShowProcessingMessage(tcs, graph.OriginalUrl, room);
-
-            var videoIndex = 0;
-            List<Task> tasks = [];
-            // Preload all preview data and assemble the relevant info
-            foreach (var media in videos.Concat(images.Skip(videos.Count)).Concat(audios))
-            {
-                if (memCache.TryGetValue(media.Value, out var cachedPreview) && cachedPreview is ProcessedPreview cp)
-                {
-                    logger.LogInformation("{MediaValue}: Cache hit!", media.Value);
-                    previews.Add(cp);
-                    continue;
-                }
-
-                logger.LogInformation("{MediaValue}: Cache miss!", media.Value);
-
-                var preview = new ProcessedPreview
-                {
-                    PreviewType = media.Name,
-                    MediaFileName = GetFileNameFromUrl(media.Value)!,
-                    MediaWidth = int.TryParse(media.Properties.ValueOrNull("width")?.First().Value, out var width)
-                        ? width
-                        : null,
-                    MediaHeight = int.TryParse(media.Properties.ValueOrNull("height")?.First().Value, out var height)
-                        ? height
-                        : null
-                };
-
-                if (preview.MediaWidth <= 0 || preview.MediaHeight <= 0)
-                    continue;
-
-                preview.MediaContentType = media.Properties.ValueOrNull("type")?.First() ??
-                                           MimeTypes.GetMimeType(preview.MediaFileName);
-
-                var mimeCategory = preview.MediaContentType.Split("/").First();
-                if (mimeCategory != media.Name)
-                {
-                    logger.LogWarning(
-                        "MimeType discrepancy! Set: {PreviewMediaContentType}, Mime: {MimeCategory}, Media.Name: {MediaName}",
-                        preview.MediaContentType, mimeCategory, media.Name);
-
-                    if (mimeCategory is "image" or "video" or "audio")
-                        preview.PreviewType = mimeCategory;
-                }
-
-                tasks.Add(DownloadMedia());
-                if (media.Name == "video")
-                {
-                    var thumbnail = images.Count >= videoIndex + 1 ? images[videoIndex] : null;
-                    videoIndex++;
-
-                    if (thumbnail != null)
-                    {
-                        preview.ThumbnailWidth = int.TryParse(thumbnail.Properties.ValueOrNull("width")?.First().Value,
-                            out var twidth)
-                            ? twidth
-                            : null;
-                        preview.ThumbnailHeight = int.TryParse(
-                            thumbnail.Properties.ValueOrNull("height")?.First().Value,
-                            out var theight)
-                            ? theight
-                            : null;
-
-                        if (preview is { ThumbnailWidth: > 0, ThumbnailHeight: > 0 })
-                        {
-                            preview.ThumbnailFileName = GetFileNameFromUrl(thumbnail.Value);
-                            preview.ThumbnailContentType = thumbnail.Properties.ValueOrNull("type")?.First() ??
-                                                           MimeTypes.GetMimeType(preview.ThumbnailFileName);
-                            tasks.Add(DownloadThumbnail());
-                        }
-
-                        async Task DownloadThumbnail()
-                        {
-                            logger.LogInformation("Downloading {ThumbnailType} for video: {ThumbnailValue}",
-                                preview.ThumbnailContentType, thumbnail.Value);
-                            using var thumbnailStream =
-                                await (await HttpClient.GetStreamAsync(thumbnail.Value)).ToMemoryStreamAsync();
-                            preview.ThumbnailUrl = await hs.UploadFile(
-                                preview.ThumbnailFileName,
-                                thumbnailStream,
-                                preview.ThumbnailContentType);
-                            preview.ThumbnailSize = thumbnailStream.Length;
-                            memCache.Set(media.Value, preview);
-                        }
-                    }
-                }
-
-                previews.Add(preview);
-                continue;
-
-                async Task DownloadMedia()
-                {
-                    logger.LogInformation("Downloading {MediaType}: {MediaValue}", preview.MediaContentType,
-                        media.Value);
-                    using var newStream = await (await HttpClient.GetStreamAsync(media.Value)).ToMemoryStreamAsync();
-                    preview.MediaUrl = await hs.UploadFile(preview.MediaFileName, newStream, preview.MediaContentType);
-                    preview.MediaSize = newStream.Length;
-                    memCache.Set(media.Value, preview);
-                }
-            }
-
-            Task.WaitAll(tasks.ToArray());
-
-            // Send the loaded previews
-            for (var i = 0; i < previews.Count; i++)
-            {
-                var preview = previews[i];
-                var content = new RoomMessageEventContent
-                {
-                    MessageType = "m." + preview.PreviewType,
-                    Url = preview.MediaUrl,
-                    FileName = preview.MediaFileName,
-                    FileInfo = new RoomMessageEventContent.FileInfoStruct
-                    {
-                        MimeType = preview.MediaContentType,
-                        Width = preview.MediaWidth,
-                        Height = preview.MediaHeight,
-                        Size = preview.MediaSize,
-                        ThumbnailUrl = preview.ThumbnailUrl,
-                        ThumbnailInfo = new RoomMessageEventContent.FileInfoStruct.ThumbnailInfoStruct
-                        {
-                            MimeType = preview.ThumbnailContentType,
-                            Width = preview.ThumbnailWidth,
-                            Height = preview.ThumbnailHeight,
-                            Size = preview.ThumbnailSize
-                        },
-                    }
-                };
-
-                if (prefix != null && i == 0)
-                {
-                    _ = room.SendMessageEventAsync(new RoomMessageEventContent(body: prefix));
-                }
-
-                // Create the body if it's the last preview
-                if (i == previews.Count - 1)
-                {
-                    content.Body = writer.ToString();
-                    content.FormattedBody = html.ToString();
-                    content.Format = "org.matrix.custom.html";
-                }
-
-                _ = room.SendMessageEventAsync(content);
-            }
-        }
-
-        if (previews.Count <= 0)
-        {
-            _ = room.SendMessageEventAsync(new RoomMessageEventContent
-            {
-                Format = "org.matrix.custom.html",
-                Body = writer.ToString(),
-                FormattedBody = html.ToString()
-            });
-        }
-
-        // Tell processing routine that we're done
-        tcs.SetResult(true);
-        return true;
-    }
-
-    private async Task<bool> ProcessDirectMedia(TaskCompletionSource<bool> tcs, GenericRoom room, Uri uri, string? prefix = null)
-    {
-        var head = await HttpClient.SendAsync(new HttpRequestMessage(HttpMethod.Head, uri));
-
-        var mimeType = head.Content.Headers.ContentType?.MediaType;
-        var mimeCategory = mimeType?.Split("/").First();
-
-        if (mimeCategory is not ("image" or "video" or "audio"))
-            return false;
-
-        _ = ShowProcessingMessage(tcs, uri, room);
-
-        var realUrl = head.RequestMessage?.RequestUri?.ToString();
-
-        if (realUrl is null)
-            return false;
-
-        if (!memCache.TryGetValue(realUrl, out var preview) || preview is not ProcessedPreview cp)
-        {
-            using var stream = await (await HttpClient.GetStreamAsync(uri)).ToMemoryStreamAsync();
-            var fileName = GetFileNameFromUrl(realUrl);
-            var mediaUrl = await hs.UploadFile(fileName!, stream, mimeType!);
-            cp = new ProcessedPreview
-            {
-                MediaFileName = fileName!,
-                MediaSize = stream.Length,
-                MediaUrl = mediaUrl
-            };
-            memCache.Set(realUrl, cp);
-        }
-
-        if (prefix != null)
-            _ = room.SendMessageEventAsync(new RoomMessageEventContent(body: prefix));
-
-        _ = room.SendMessageEventAsync(new RoomMessageEventContent
-        {
-            FileName = cp.MediaFileName,
-            Url = cp.MediaUrl,
-            MessageType = "m." + mimeCategory,
-            FileInfo = new RoomMessageEventContent.FileInfoStruct
-            {
-                Size = cp.MediaSize,
-                MimeType = mimeType,
-            }
-        });
-
-        tcs.SetResult(true);
-        return true;
     }
 
     private async Task ShowProcessingMessage(TaskCompletionSource<bool> tcs, Uri? uri, GenericRoom room)
     {
         var decryptedRoom = DecryptedHomeserver.GetRoom(room.RoomId);
-        await decryptedRoom.SendTypingNotificationAsync(true);
+        _ = decryptedRoom.SendTypingNotificationAsync(true);
         var @event = await room.SendMessageEventAsync(new RoomMessageEventContent
         {
             Format = "org.matrix.custom.html",
@@ -342,12 +119,17 @@ public class PreviewBot(
         });
 
         // Wait for previewing to complete
-        await tcs.Task;
+        while (!tcs.Task.IsCompleted)
+        {
+            await Task.Delay(1000);
+            await decryptedRoom.SendTypingNotificationAsync(true);
+        }
+
         await decryptedRoom.RedactEventAsync(@event.EventId, "Temporary, embed has been provided.");
         await decryptedRoom.SendTypingNotificationAsync(false);
     }
 
-    private static string? GetFileNameFromUrl(string? url)
+    internal static string? GetFileNameFromUrl(string? url)
     {
         if (url is null)
             return null;
