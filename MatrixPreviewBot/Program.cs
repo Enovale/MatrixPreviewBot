@@ -1,4 +1,5 @@
-﻿using LibMatrix.Services;
+﻿using System.Net;
+using LibMatrix.Services;
 using LibMatrix.Utilities.Bot;
 using MatrixPreviewBot;
 using MatrixPreviewBot.Configuration;
@@ -7,7 +8,8 @@ using MatrixPreviewBot.Processors;
 
 var builder = Host.CreateDefaultBuilder(args);
 
-builder.ConfigureHostOptions(host => {
+builder.ConfigureHostOptions(host =>
+{
     host.ServicesStartConcurrently = true;
     host.ServicesStopConcurrently = true;
     host.ShutdownTimeout = TimeSpan.FromSeconds(5);
@@ -16,20 +18,28 @@ builder.ConfigureHostOptions(host => {
 if (Environment.GetEnvironmentVariable("URL_PREVIEW_BOT_APPSETTINGS_PATH") is { } path)
     builder.ConfigureAppConfiguration(x => x.AddJsonFile(path));
 
-var host = builder.ConfigureServices((_, services) => {
+var host = builder.ConfigureServices((_, services) =>
+{
     services.AddSingleton<BotConfiguration>();
     services.AddSingleton<LinkListenerConfiguration>();
-    
-    services.AddSingleton<HttpClient>();
+
+    services.AddSingleton(new HttpClient(new HttpClientHandler
+    {
+        AutomaticDecompression = DecompressionMethods.Deflate | DecompressionMethods.GZip
+    })
+    {
+        Timeout = TimeSpan.FromSeconds(30)
+    });
     services.AddMemoryCache();
 
-    services.AddRoryLibMatrixServices(new() {
+    services.AddRoryLibMatrixServices(new()
+    {
         AppName = "UrlPreviewBot"
     });
     services.AddMatrixBot()
         .WithInviteHandler(InviteHandler.HandleAsync)
         ;
-    
+
     // Add processors
     services.AddSingleton<TumblrProcessor>();
     services.AddSingleton<DirectMediaProcessor>();

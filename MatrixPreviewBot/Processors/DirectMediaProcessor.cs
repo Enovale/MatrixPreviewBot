@@ -11,7 +11,7 @@ public class DirectMediaProcessor(AuthenticatedHomeserverGeneric hs, IMemoryCach
 {
     public override async Task<IEnumerable<RoomMessageEventContent>?> ProcessUriAsync(GenericRoom room, Uri uri)
     {
-        var head = await httpClient.SendAsync(new HttpRequestMessage(HttpMethod.Head, uri));
+        var head = await httpClient.SendAsync(new HttpRequestMessage(HttpMethod.Head, uri)).ConfigureAwait(false);
 
         var mimeType = head.Content.Headers.ContentType?.MediaType;
         var mimeCategory = mimeType?.Split("/").First();
@@ -26,9 +26,9 @@ public class DirectMediaProcessor(AuthenticatedHomeserverGeneric hs, IMemoryCach
 
         if (!memCache.TryGetValue(realUrl, out var preview) || preview is not ProcessedPreview cp)
         {
-            using var stream = await (await httpClient.GetStreamAsync(uri)).ToMemoryStreamAsync();
+            using var stream = await httpClient.GetPageInMemoryAsync(uri);
             var fileName = PreviewBot.GetFileNameFromUrl(realUrl);
-            var mediaUrl = await hs.UploadFile(fileName!, stream, mimeType!);
+            var mediaUrl = await hs.UploadFile(fileName!, stream, mimeType!).ConfigureAwait(false);
             cp = new ProcessedPreview
             {
                 MediaFileName = fileName!,
