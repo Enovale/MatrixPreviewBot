@@ -1,15 +1,11 @@
 using System.Text;
-using ArcaneLibs.Extensions;
 using LibMatrix;
 using LibMatrix.EventTypes.Spec;
 using LibMatrix.Homeservers;
 using LibMatrix.RoomTypes;
 using LibMatrix.Services;
 using MatrixPreviewBot.Configuration;
-using MatrixPreviewBot.Extensions;
 using MatrixPreviewBot.Processors;
-using Microsoft.Extensions.Caching.Memory;
-using OpenGraphNet;
 
 namespace MatrixPreviewBot;
 
@@ -18,7 +14,6 @@ public class PreviewBot(
     ILogger<PreviewBot> logger,
     HomeserverProviderService hsProviderService,
     BotConfiguration configuration,
-    IMemoryCache memCache,
     HttpClient httpClient,
     TumblrProcessor tumblrProcessor,
     DirectMediaProcessor directMediaProcessor,
@@ -77,9 +72,16 @@ public class PreviewBot(
 
                 foreach (var processor in Processors)
                 {
-                    var result = await processor.ProcessUriAsync(room, uri).ConfigureAwait(false);
-                    if (result != null)
-                        results.Add(result);
+                    try
+                    {
+                        var result = await processor.ProcessUriAsync(room, uri).ConfigureAwait(false);
+                        if (result != null)
+                            results.Add(result);
+                    }
+                    catch (Exception e)
+                    {
+                        logger.LogError("Processing URI failed! {Exception}", e);
+                    }
                 }
 
                 tcs.SetResult(true);
@@ -89,7 +91,7 @@ public class PreviewBot(
             {
                 foreach (var message in resultSet)
                 {
-                    if (!anythingReturned)
+                    if (!anythingReturned && !string.IsNullOrWhiteSpace(prefix))
                         _ = room.SendMessageEventAsync(new RoomMessageEventContent(body: prefix));
 
                     anythingReturned = true;
